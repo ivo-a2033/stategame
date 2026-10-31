@@ -2,11 +2,16 @@
 
 const WORLD_W = CONFIG.GRID_W * CONFIG.CELL;
 const WORLD_H = CONFIG.GRID_H * CONFIG.CELL;
+const STATUE_KEYS = [
+  'statue_angel', 'statue_archer', 'statue_cat', 'statue_centaur',
+  'statue_demonic_bust', 'statue_dragon', 'statue_dwarf',
+  'statue_elephant', 'statue_hydra', 'statue_imp',
+];
 
-function shade(hex, f) {
-  const r = Math.round(((hex >> 16) & 255) * f);
-  const g = Math.round(((hex >> 8) & 255) * f);
-  const b = Math.round((hex & 255) * f);
+function fadeFromWhite(hex, strength) {
+  const r = Math.round(255 + (((hex >> 16) & 255) - 255) * strength);
+  const g = Math.round(255 + (((hex >> 8) & 255) - 255) * strength);
+  const b = Math.round(255 + ((hex & 255) - 255) * strength);
   return (r << 16) | (g << 8) | b;
 }
 function css(hex) { return '#' + hex.toString(16).padStart(6, '0'); }
@@ -42,14 +47,25 @@ class MenuScene extends Phaser.Scene {
 class GameScene extends Phaser.Scene {
   constructor() { super('Game'); }
 
+  preload() {
+    for (const key of STATUE_KEYS) this.load.image(key, 'assets/' + key + '.png');
+  }
+
   create() {
     const C = CONFIG;
     this.cameras.main.setBackgroundColor(C.COLORS.ocean);
+    for (const key of STATUE_KEYS) {
+      for (const source of this.textures.get(key).source) {
+        source.setFilter(Phaser.Textures.FilterMode.NEAREST);
+      }
+    }
 
     const seed = (Date.now() ^ Math.floor(Math.random() * 4294967296)) >>> 0;
     this.map = generateMapWithRetry(seed);
     this.sim = new Sim(this.map, this.map.seed);
     this.selected = null;
+    this.hoveredCap = null;
+    this.pointerWorld = { x: WORLD_W / 2, y: WORLD_H / 2 };
     this.acc = 0;
     this.endTime = 0;
     this.overlayShown = false;
@@ -72,44 +88,72 @@ class GameScene extends Phaser.Scene {
     this.add.image(0, 0, 'terrain').setOrigin(0, 0).setDepth(0);
 
     this.unitG = this.add.graphics().setDepth(1);
-    this.capG = this.add.graphics().setDepth(2);
+    this.capG = this.add.graphics().setDepth(2.5);
+    const statueKeys = Phaser.Utils.Array.Shuffle(STATUE_KEYS.slice());
+    this.playerStatues = Array.from({ length: 1 + C.N_ENEMIES }, (_, i) =>
+      statueKeys[i % statueKeys.length]);
+    const areas = this.sim.caps.map((cap) => cap.area);
+    const minArea = Math.min(...areas), maxArea = Math.max(...areas);
+    this.capitalImageSizes = this.sim.caps.map((cap) => {
+      const t = maxArea === minArea ? 0.5 : (cap.area - minArea) / (maxArea - minArea);
+      const scale = C.CAPITAL_IMAGE_MIN_SCALE
+        + t * (C.CAPITAL_IMAGE_MAX_SCALE - C.CAPITAL_IMAGE_MIN_SCALE);
+      return C.CAPITAL_IMAGE_SIZE * scale;
+    });
+    this.capImages = this.sim.caps.map((cap) =>
+      this.add.image(cap.x, cap.y, this.playerStatues[0])
+        .setDisplaySize(this.capitalImageSizes[cap.id], this.capitalImageSizes[cap.id])
+        .setDepth(2).setVisible(false));
 
     this.capTexts = this.sim.caps.map((cap) =>
-      this.add.text(cap.x, cap.y - C.CAPITAL_RADIUS - 1, '', {
+      this.add.text(cap.x, cap.y - this.capitalImageSizes[cap.id] / 2 - 1, '', {
         fontFamily: 'Arial', fontSize: '12px', fontStyle: 'bold', color: '#ffffff',
         stroke: '#000000', strokeThickness: 3,
       }).setOrigin(0.5, 1).setResolution(2).setDepth(3));
     this.shownTroops = this.sim.caps.map(() => -1);
+    this.shownColors = this.sim.caps.map((cap) => Math.min(Math.floor(cap.troops), 100));
+    this.capPulseUntil = this.sim.caps.map(() => 0);
+    this.shareBar = this.add.graphics().setDepth(4);
 
     this.add.text(4, WORLD_H - 4, 'seed ' + this.map.seed, {
       fontFamily: 'monospace', fontSize: '10px', color: '#6b8299',
     }).setOrigin(0, 1).setDepth(3);
 
-    this.input.on('pointerdown', (p) => this.onClick(p.worldX, p.worldY));
+    this.input.on('pointermove', (p) => {
+      this.pointerWorld.x = p.worldX;
+      this.pointerWorld.y = p.worldY;
+      this.hoveredCap = this.pickCap(p.worldX, p.worldY);
+    });
+    this.input.on('pointerdown', (p) => {
+      this.pointerWorld.x = p.worldX;
+      this.pointerWorld.y = p.worldY;
+      this.onClick(p.worldX, p.worldY);
+    });
   }
 
   paintRegion(id) {
     const C = CONFIG, ctx = this.terrain.getContext(), cell = C.CELL, w = this.map.w;
     const cap = this.sim.caps[id];
-    const fill = css(shade(ownerColor(cap.owner), C.COLORS.territoryShade));
-    const seamCol = css(C.COLORS.seam);
-    const cells = this.regionCells[id], seam = this.map.seam;
+    const fill = css(fadeFromWhite(ownerColor(cap.owner), Math.max(0, Math.min(cap.troops / 200 + .5, 1))));
+    const border = css(C.COLORS.seam);
+    const cells = this.regionCells[id], regionId = this.map.regionId;
     ctx.fillStyle = fill;
     for (let k = 0; k < cells.length; k++) {
       const i = cells[k];
-      if (seam[i]) continue;
-      ctx.fillRect((i % w) * cell, ((i / w) | 0) * cell, cell, cell);
-    }
-    ctx.fillStyle = seamCol;
-    for (let k = 0; k < cells.length; k++) {
-      const i = cells[k];
-      if (!seam[i]) continue;
-      ctx.fillRect((i % w) * cell, ((i / w) | 0) * cell, cell, cell);
+      const x = (i % w) * cell, y = ((i / w) | 0) * cell;
+      ctx.fillRect(x, y, cell, cell);
+
+      ctx.fillStyle = border;
+      if (i >= w && regionId[i - w] >= 0 && regionId[i - w] !== id) ctx.fillRect(x, y, cell, 1);
+      if (i % w < w - 1 && regionId[i + 1] >= 0 && regionId[i + 1] !== id) ctx.fillRect(x + cell - 1, y, 1, cell);
+      if (i < regionId.length - w && regionId[i + w] >= 0 && regionId[i + w] !== id) ctx.fillRect(x, y + cell - 1, cell, 1);
+      if (i % w > 0 && regionId[i - 1] >= 0 && regionId[i - 1] !== id) ctx.fillRect(x, y, 1, cell);
+      ctx.fillStyle = fill;
     }
   }
 
   pickCap(x, y) {
-    const R = CONFIG.CAPITAL_RADIUS * 2.2;
+    const R = Math.max(CONFIG.HOVER_RADIUS, CONFIG.CAPITAL_RADIUS * 2.2);
     let best = null, bd = R * R;
     for (const cap of this.sim.caps) {
       const d = (cap.x - x) ** 2 + (cap.y - y) ** 2;
@@ -123,7 +167,7 @@ class GameScene extends Phaser.Scene {
       if (this.time.now - this.endTime > 600) this.scene.start('Menu');
       return;
     }
-    const hit = this.pickCap(x, y);
+    const hit = this.hoveredCap = this.pickCap(x, y);
     if (this.selected === null) {
       if (hit && hit.owner === HUMAN) this.selected = hit.id;
       return;
@@ -145,11 +189,30 @@ class GameScene extends Phaser.Scene {
       }
     }
 
+    let terrainChanged = false;
     if (sim.events.length) {
-      for (const e of sim.events) if (e.type === 'capture') this.paintRegion(e.id);
+      for (const e of sim.events) {
+        if (e.type === 'capture') {
+          this.paintRegion(e.id);
+          const cap = sim.caps[e.id];
+          this.capImages[e.id].setTexture(this.playerStatues[cap.owner]);
+          this.capImages[e.id].setVisible(true);
+          terrainChanged = true;
+        } else if (e.type === 'troop-change') {
+          this.capPulseUntil[e.id] = this.time.now + CONFIG.CAPITAL_PULSE_DURATION * 1000;
+        }
+      }
       sim.events.length = 0;
-      this.terrain.refresh();
     }
+    for (const cap of sim.caps) {
+      const colorLevel = Math.max(0, Math.min(Math.floor(cap.troops), 100));
+      if (colorLevel !== this.shownColors[cap.id]) {
+        this.shownColors[cap.id] = colorLevel;
+        this.paintRegion(cap.id);
+        terrainChanged = true;
+      }
+    }
+    if (terrainChanged) this.terrain.refresh();
 
     if (this.selected !== null && sim.caps[this.selected].owner !== HUMAN) this.selected = null;
 
@@ -168,18 +231,37 @@ class GameScene extends Phaser.Scene {
     for (let o = 0; o < owners; o++) {
       g.fillStyle(ownerColor(o), 1);
       for (const u of sim.units) {
-        if (u.owner === o) g.fillRect(u.x - 1.5, u.y - 1.5, 3, 3);
+        if (u.owner === o) {
+          g.fillStyle(0x000000, 1);
+          g.fillRect(u.x - 4, u.y - 4, 8, 8);
+          g.fillStyle(ownerColor(o), 1);
+          g.fillRect(u.x - 3, u.y - 3, 6, 6);
+        }
       }
     }
 
     // capitals
     const cg = this.capG;
     cg.clear();
+    const now = this.time.now;
     for (const cap of sim.caps) {
-      cg.fillStyle(ownerColor(cap.owner), 1);
-      cg.fillCircle(cap.x, cap.y, C.CAPITAL_RADIUS - 1);
-      cg.lineStyle(2, 0x000000, 0.9);
-      cg.strokeCircle(cap.x, cap.y, C.CAPITAL_RADIUS - 1);
+      const pulseProgress = Math.max(0, Math.min(1,
+        1 - (this.capPulseUntil[cap.id] - now) / (C.CAPITAL_PULSE_DURATION * 1000)));
+      const pulse = Math.sin(pulseProgress * Math.PI) * C.CAPITAL_PULSE_AMOUNT;
+      const radius = C.CAPITAL_RADIUS - 1 + pulse;
+      if (cap.owner < 0) {
+        cg.fillStyle(ownerColor(cap.owner), 1);
+        cg.fillCircle(cap.x, cap.y, radius);
+        cg.lineStyle(2, 0x000000, 0.9);
+        cg.strokeCircle(cap.x, cap.y, radius);
+      } else {
+        const imageSize = this.capitalImageSizes[cap.id]
+          * (radius / (C.CAPITAL_RADIUS - 1));
+        this.capImages[cap.id]
+          .setTexture(this.playerStatues[cap.owner])
+          .setVisible(true)
+          .setDisplaySize(imageSize, imageSize);
+      }
 
       const t = Math.floor(cap.troops);
       if (t !== this.shownTroops[cap.id]) {
@@ -189,8 +271,67 @@ class GameScene extends Phaser.Scene {
     }
     if (this.selected !== null) {
       const cap = sim.caps[this.selected];
+      const radius = C.CAPITAL_RADIUS + 5
+        + Math.sin(now / 1000 * C.HOVER_PULSE_SPEED) * C.HOVER_PULSE_AMOUNT;
+      const segments = 32;
+      const step = Math.PI * 2 / segments;
+      for (let i = 0; i < segments; i++) {
+        const a0 = i * step, a1 = (i + 1) * step;
+        cg.lineStyle(3, i % 2 ? 0x000000 : 0xffffff, 1);
+        cg.lineBetween(cap.x + Math.cos(a0) * radius, cap.y + Math.sin(a0) * radius,
+          cap.x + Math.cos(a1) * radius, cap.y + Math.sin(a1) * radius);
+      }
+    }
+    if (this.hoveredCap && this.hoveredCap.id !== this.selected) {
+      const cap = this.hoveredCap;
+      const radius = C.CAPITAL_RADIUS + 5
+        + Math.sin(now / 1000 * C.HOVER_PULSE_SPEED) * C.HOVER_PULSE_AMOUNT;
       cg.lineStyle(2, 0xffffff, 1);
-      cg.strokeCircle(cap.x, cap.y, C.CAPITAL_RADIUS + 5);
+      cg.strokeCircle(cap.x, cap.y, radius);
+    }
+    if (this.selected !== null) {
+      const source = sim.caps[this.selected];
+      const dx = this.pointerWorld.x - source.x, dy = this.pointerWorld.y - source.y;
+      const length = Math.hypot(dx, dy);
+      if (length > 0) {
+        const ux = dx / length, uy = dy / length;
+        const head = 9;
+        cg.lineStyle(4, 0x000000, 0.75);
+        cg.lineBetween(source.x, source.y, this.pointerWorld.x, this.pointerWorld.y);
+        cg.lineBetween(this.pointerWorld.x, this.pointerWorld.y,
+          this.pointerWorld.x - ux * head - uy * head * 0.6,
+          this.pointerWorld.y - uy * head + ux * head * 0.6);
+        cg.lineBetween(this.pointerWorld.x, this.pointerWorld.y,
+          this.pointerWorld.x - ux * head + uy * head * 0.6,
+          this.pointerWorld.y - uy * head - ux * head * 0.6);
+        cg.lineStyle(2, 0xffffff, 1);
+        cg.lineBetween(source.x, source.y, this.pointerWorld.x, this.pointerWorld.y);
+        cg.lineBetween(this.pointerWorld.x, this.pointerWorld.y,
+          this.pointerWorld.x - ux * head - uy * head * 0.6,
+          this.pointerWorld.y - uy * head + ux * head * 0.6);
+        cg.lineBetween(this.pointerWorld.x, this.pointerWorld.y,
+          this.pointerWorld.x - ux * head + uy * head * 0.6,
+          this.pointerWorld.y - uy * head - ux * head * 0.6);
+      }
+    }
+
+    const totals = new Float64Array(owners);
+    for (const cap of sim.caps) if (cap.owner >= 0) totals[cap.owner] += cap.troops;
+    for (const unit of sim.units) if (!unit.dead && unit.owner >= 0) totals[unit.owner]++;
+    let total = 0;
+    for (const count of totals) total += count;
+    const bar = this.shareBar;
+    bar.clear();
+    bar.fillStyle(0x050a10, 0.9);
+    bar.fillRect(0, 0, WORLD_W, 8);
+    if (total > 0) {
+      let x = 0;
+      for (let owner = 0; owner < owners; owner++) {
+        const width = WORLD_W * totals[owner] / total;
+        bar.fillStyle(ownerColor(owner), 1);
+        bar.fillRect(x, 0, width, 8);
+        x += width;
+      }
     }
   }
 

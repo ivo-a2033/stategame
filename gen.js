@@ -168,10 +168,8 @@ function generateMap(seed) {
     if (y < h - 1) { const j = i + w; if (land[j] && seam[j] && regionId[j] < 0) { regionId[j] = r; queue[qt++] = j; } }
   }
   // Land that never joined a territory (seam clusters cut off from everything) becomes ocean.
-  const seamMask = new Uint8Array(N);
   for (let i = 0; i < N; i++) {
     if (regionId[i] < 0) land[i] = 0;
-    else if (seam[i]) seamMask[i] = 1;
   }
 
   // 5. Capitals: centroid, snapped to the nearest territory cell if outside
@@ -198,7 +196,7 @@ function generateMap(seed) {
     capitals.push({ id: r, cx, cy, area: area[r] });
   }
 
-  return { w, h, seed, regionId, seam: seamMask, land, capitals };
+  return { w, h, seed, regionId, land, capitals };
 }
 
 // 7. Reject and regenerate until the map is usable.
