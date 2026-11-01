@@ -1,28 +1,19 @@
 import os
-from flask import Flask, send_from_directory, abort
+from flask import Flask, send_from_directory
 
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+DOCS_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "docs")
 
 app = Flask(__name__, static_folder=None)
 
 
 @app.route("/")
 def index():
-    return send_from_directory(BASE_DIR, "index.html")
-
-
-@app.route("/assets/<path:filename>")
-def assets(filename):
-    # Serves everything inside the assets folder (including subfolders)
-    return send_from_directory(os.path.join(BASE_DIR, "assets"), filename)
+    return send_from_directory(DOCS_DIR, "index.html")
 
 
 @app.route("/<path:filename>")
-def root_js(filename):
-    # Serves .js files that live in the project folder (e.g. /main.js)
-    if not filename.endswith(".js"):
-        abort(404)
-    return send_from_directory(BASE_DIR, filename)
+def static_files(filename):
+    return send_from_directory(DOCS_DIR, filename)
 
 
 if __name__ == "__main__":
