@@ -15,9 +15,25 @@ function fadeFromWhite(hex, strength) {
   return (r << 16) | (g << 8) | b;
 }
 function css(hex) { return '#' + hex.toString(16).padStart(6, '0'); }
+function generatedPlayerColor(index) {
+  const hue = (index * 137.508) % 360;
+  const chroma = 0.72;
+  const x = chroma * (1 - Math.abs((hue / 60) % 2 - 1));
+  let r = 0, g = 0, b = 0;
+  if (hue < 60) { r = chroma; g = x; }
+  else if (hue < 120) { r = x; g = chroma; }
+  else if (hue < 180) { g = chroma; b = x; }
+  else if (hue < 240) { g = x; b = chroma; }
+  else if (hue < 300) { r = x; b = chroma; }
+  else { r = chroma; b = x; }
+  const m = 0.14;
+  return (Math.round((r + m) * 255) << 16)
+    | (Math.round((g + m) * 255) << 8)
+    | Math.round((b + m) * 255);
+}
 function ownerColor(owner) {
   const P = CONFIG.COLORS.players;
-  return owner < 0 ? CONFIG.COLORS.neutral : P[owner % P.length];
+  return owner < 0 ? CONFIG.COLORS.neutral : (P[owner] ?? generatedPlayerColor(owner));
 }
 
 class MenuScene extends Phaser.Scene {

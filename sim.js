@@ -10,7 +10,6 @@ class Sim {
     this.map = map;
     this.rng = mulberry32((seed ^ 0x9e3779b9) >>> 0);
     this.time = 0;
-    this.aiTimer = 0;
     this.result = null;        // null | 'win' | 'lose'
     this.events = [];          // capture and troop-change events drained by the renderer
     this.units = [];
@@ -40,13 +39,20 @@ class Sim {
     const players = 1 + C.N_ENEMIES;
     this.aiMinTroops = new Array(players).fill(0);
     this.aiIntelligence = new Array(players).fill(0);
+    this.aiMoveIntervals = new Array(players).fill(0);
+    this.aiMoveTimers = new Array(players).fill(0);
+    this.aiMoveDelays = new Array(players).fill(0);
     for (let owner = 1; owner < players; owner++) {
       const minRange = C.AI_MIN_TROOPS;
-      const intelligenceRange = C.AI_INTELLIGENCE;
+      const intelligenceLevels = C.AI_INTELLIGENCE;
       this.aiMinTroops[owner] = Math.floor(
         minRange[0] + rng() * (minRange[1] - minRange[0] + 1));
-      this.aiIntelligence[owner] = intelligenceRange[0]
-        + rng() * (intelligenceRange[1] - intelligenceRange[0]);
+      this.aiIntelligence[owner] = intelligenceLevels[
+        Math.floor(rng() * intelligenceLevels.length)];
+      const intervalRange = C.AI_MOVE_INTERVAL;
+      this.aiMoveIntervals[owner] = intervalRange[0]
+        + rng() * (intervalRange[1] - intervalRange[0]);
+      this.aiMoveDelays[owner] = this._randomAiMoveDelay(owner);
     }
     const dist = (a, b) => Math.hypot(caps[a].x - caps[b].x, caps[a].y - caps[b].y);
 
@@ -109,17 +115,26 @@ class Sim {
     this._checkEnd();
   }
 
-  // Idle AI capitals decide on a target at the configured interval.
+  // Idle AI capitals decide on a target using their owner's move interval.
   _ai(dt) {
-    const C = CONFIG;
-    this.aiTimer += dt;
-    if (this.aiTimer < C.AI_MOVE_INTERVAL) return;
-    this.aiTimer -= C.AI_MOVE_INTERVAL;
-    for (const cap of this.caps) {
-      if (cap.owner < 1 || cap.troops < this.aiMinTroops[cap.owner] || cap.orders.length) continue;
-      const target = this._aiPickTarget(cap);
-      if (target >= 0) this.send(cap.id, target, cap.owner);
+    for (let owner = 1; owner < this.aiMoveIntervals.length; owner++) {
+      this.aiMoveTimers[owner] += dt;
+      if (this.aiMoveTimers[owner] < this.aiMoveDelays[owner]) continue;
+      this.aiMoveTimers[owner] -= this.aiMoveDelays[owner];
+      this.aiMoveDelays[owner] = this._randomAiMoveDelay(owner);
+      for (const cap of this.caps) {
+        if (cap.owner !== owner || cap.troops < this.aiMinTroops[owner] || cap.orders.length) continue;
+        const target = this._aiPickTarget(cap);
+        if (target >= 0) this.send(cap.id, target, owner);
+      }
     }
+  }
+
+  _randomAiMoveDelay(owner) {
+    const C = CONFIG;
+    const [minInterval, maxInterval] = C.AI_MOVE_INTERVAL;
+    const variation = (this.rng() * 2 - 1) * C.AI_MOVE_INTERVAL_JITTER;
+    return Math.max(minInterval, Math.min(maxInterval, this.aiMoveIntervals[owner] + variation));
   }
 
   _aiPickTarget(cap) {

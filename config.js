@@ -26,7 +26,7 @@ const CONFIG = {
   MAX_GEN_ATTEMPTS: 60,
 
   // Match
-  N_ENEMIES: 4,
+  N_ENEMIES: 5,
   START_TROOPS: 60,
   NEUTRAL_TROOPS: [5, 18],
   GROWTH_PER_AREA: 0.002,    // troops/s per cell
@@ -41,7 +41,7 @@ const CONFIG = {
   CLASH_RADIUS: 4,
   CAPITAL_RADIUS: 8,
   CAPITAL_PULSE_AMOUNT: 1.5,
-  CAPITAL_PULSE_DURATION: 0.8, // seconds
+  CAPITAL_PULSE_DURATION: 0.4, // seconds
   CAPITAL_IMAGE_SIZE: 24,
   CAPITAL_IMAGE_MIN_SCALE: 1.5,
   CAPITAL_IMAGE_MAX_SCALE: 2.5,
@@ -51,10 +51,11 @@ const CONFIG = {
   HOVER_PULSE_SPEED: 5,       // radians/s
 
   // Difficulty
-  AI_START_TROOPS: 50,
-  AI_MOVE_INTERVAL: 1,       // seconds between AI decisions
+  AI_START_TROOPS: 120,
+  AI_MOVE_INTERVAL: [0.8, 3], // per-AI base interval range in seconds
+  AI_MOVE_INTERVAL_JITTER: 0.5, // seconds of per-decision interval variation
   AI_MIN_TROOPS: [5, 25],    // per-AI reserve threshold range
-  AI_INTELLIGENCE: [0, 1],   // per-AI intelligence range: 0 = random, 1 = strategic
+  AI_INTELLIGENCE: [0, 0.5, 1], // per-AI intelligence: random, mixed, or strategic
 
   // Loop
   SIM_DT: 1 / 60,
