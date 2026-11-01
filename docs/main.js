@@ -36,6 +36,120 @@ function ownerColor(owner) {
   return owner < 0 ? CONFIG.COLORS.neutral : (P[owner] ?? generatedPlayerColor(owner));
 }
 
+function glslColor(hex) {
+  const channel = (shift) => (((hex >> shift) & 255) / 255).toFixed(4);
+  return `vec3(${channel(16)}, ${channel(8)}, ${channel(0)})`;
+}
+
+function createSeaFragmentShader() {
+  const { SEA_LAYER_COUNT: count, SEA_LAYERS: layers, SEA_COLORS: colors } = CONFIG;
+  if (!Number.isInteger(count) || count < 0 || count > 8 || count > layers.length) {
+    throw new Error('SEA_LAYER_COUNT must be between 0 and 8 and not exceed SEA_LAYERS.length');
+  }
+  if (!Array.isArray(colors) || colors.length < 1 || colors.length > 5
+    || !colors.every((color) => Number.isInteger(color) && color >= 0 && color <= 0xffffff)) {
+    throw new Error('SEA_COLORS must contain between 1 and 5 valid hex colors');
+  }
+
+  const layerCode = layers.slice(0, count).map((layer, index) => {
+    if (!Number.isFinite(layer.scale) || layer.scale <= 0
+      || !Array.isArray(layer.speed) || layer.speed.length !== 2
+      || !layer.speed.every(Number.isFinite)) {
+      throw new Error(`Invalid sea layer configuration at index ${index}`);
+    }
+
+    return `
+      noiseSum += perlin(pos * ${layer.scale.toFixed(5)}
+        + time * vec2(${layer.speed[0].toFixed(4)}, ${layer.speed[1].toFixed(4)}));
+    `;
+  }).join('\n');
+  const noiseAverage = count > 0 ? `noiseSum / ${count.toFixed(1)}` : '0.0';
+  const colorBands = colors.slice(1).map((color, index) => `
+    if (seaNoise >= ${((index + 1) / colors.length).toFixed(4)}) {
+      sea = ${glslColor(color)};
+    }
+  `).join('\n');
+
+  return `
+    precision highp float;
+    uniform sampler2D uMainSampler;
+    uniform float time;
+    uniform vec2 resolution;
+    varying vec2 outTexCoord;
+
+    float permute(float x) {
+      return mod(((x * 34.0) + 1.0) * x, 289.0);
+    }
+
+    float hash(vec2 p) {
+      p = mod(p, 289.0);
+      return permute(permute(p.x) + p.y) / 289.0;
+    }
+
+    vec2 gradient(vec2 p) {
+      float h = floor(hash(p) * 8.0);
+      if (h < 1.0) return vec2(1.0, 0.0);
+      if (h < 2.0) return vec2(-1.0, 0.0);
+      if (h < 3.0) return vec2(0.0, 1.0);
+      if (h < 4.0) return vec2(0.0, -1.0);
+      if (h < 5.0) return vec2(0.7071068, 0.7071068);
+      if (h < 6.0) return vec2(-0.7071068, 0.7071068);
+      if (h < 7.0) return vec2(0.7071068, -0.7071068);
+      return vec2(-0.7071068, -0.7071068);
+    }
+
+    float perlin(vec2 p) {
+      vec2 cell = floor(p);
+      vec2 local = fract(p);
+      vec2 fade = local * local * local * (local * (local * 6.0 - 15.0) + 10.0);
+      float n00 = dot(gradient(cell), local);
+      float n10 = dot(gradient(cell + vec2(1.0, 0.0)), local - vec2(1.0, 0.0));
+      float n01 = dot(gradient(cell + vec2(0.0, 1.0)), local - vec2(0.0, 1.0));
+      float n11 = dot(gradient(cell + vec2(1.0, 1.0)), local - vec2(1.0, 1.0));
+      float value = mix(mix(n00, n10, fade.x), mix(n01, n11, fade.x), fade.y);
+      return 0.2 + value * 1.0;
+    }
+
+    void main() {
+      vec4 map = texture2D(uMainSampler, outTexCoord);
+      vec2 texel = 1.0 / resolution;
+      float landCoverage = 0.0;
+      for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+          landCoverage += texture2D(
+            uMainSampler,
+            outTexCoord + texel * vec2(float(x), float(y)) * 1.5
+          ).a;
+        }
+      }
+      landCoverage /= 9.0;
+
+      vec2 pos = outTexCoord * resolution;
+      float noiseSum = 0.0;
+      ${layerCode}
+      float seaNoise = ${noiseAverage};
+      vec3 sea = ${glslColor(colors[0])};
+      ${colorBands}
+
+      gl_FragColor = vec4(mix(sea, map.rgb, landCoverage), 1.0);
+    }
+  `;
+}
+
+class SeaPipeline extends Phaser.Renderer.WebGL.Pipelines.SinglePipeline {
+  constructor(game) {
+    super({
+      game,
+      fragShader: createSeaFragmentShader(),
+    });
+  }
+
+  onBind() {
+    this.set1f('time', this.game.loop.time / 1000);
+    this.set2f('resolution', WORLD_W, WORLD_H);
+  }
+}
+
 class MenuScene extends Phaser.Scene {
   constructor() { super('Menu'); }
 
@@ -97,11 +211,11 @@ class GameScene extends Phaser.Scene {
     if (this.textures.exists('terrain')) this.textures.remove('terrain');
     this.terrain = this.textures.createCanvas('terrain', WORLD_W, WORLD_H);
     const ctx = this.terrain.getContext();
-    ctx.fillStyle = css(C.COLORS.ocean);
-    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+    ctx.clearRect(0, 0, WORLD_W, WORLD_H);
     for (const cap of this.sim.caps) this.paintRegion(cap.id);
     this.terrain.refresh();
-    this.add.image(0, 0, 'terrain').setOrigin(0, 0).setDepth(0);
+    const terrainImage = this.add.image(0, 0, 'terrain').setOrigin(0, 0).setDepth(0);
+    if (this.game.renderer.type === Phaser.WEBGL) terrainImage.setPipeline('SeaPipeline');
 
     this.unitG = this.add.graphics().setDepth(1);
     this.capG = this.add.graphics().setDepth(2.5);
@@ -371,6 +485,9 @@ new Phaser.Game({
   width: WORLD_W,
   height: WORLD_H,
   backgroundColor: '#0d2238',
+  pipeline: {
+    SeaPipeline,
+  },
   scale: {
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH,
