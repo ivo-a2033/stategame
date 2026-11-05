@@ -4,9 +4,10 @@ const HUMAN = 0;
 const NEUTRAL = -1;
 
 class Sim {
-  constructor(map, seed, startTroops = CONFIG.START_TROOPS) {
+  constructor(map, seed, startTroops = CONFIG.START_TROOPS, enemyCount = CONFIG.N_ENEMIES) {
     const C = CONFIG;
     this.map = map;
+    this.enemyCount = enemyCount;
     this.rng = mulberry32((seed ^ 0x9e3779b9) >>> 0);
     this.time = 0;
     const requestedStartTroops = Number.isFinite(startTroops)
@@ -14,7 +15,7 @@ class Sim {
     this.startTroops = Math.max(
       C.START_TROOPS_MIN, Math.min(C.START_TROOPS_MAX, requestedStartTroops));
     this.result = null;        // null | 'win' | 'lose'
-    this.events = [];          // capture and troop-change events drained by the renderer
+    this.events = [];          // simulation events drained by the renderer
     this.units = [];
     this.caps = map.capitals.map((c) => ({
       id: c.id,
@@ -41,7 +42,7 @@ class Sim {
 
   _setupMatch() {
     const C = CONFIG, caps = this.caps, rng = this.rng;
-    const players = 1 + C.N_ENEMIES;
+    const players = 1 + this.enemyCount;
     this.aiIntelligence = new Array(players).fill(0);
     this.aiAggression = new Array(players).fill(0);
     this.aiNeutralPreference = new Array(players).fill(0);
@@ -189,7 +190,7 @@ class Sim {
     const sent = Math.floor(cap.troops * C.SEND_FRACTION);
     if (sent < 1) return -1;
 
-    const powerByOwner = new Float64Array(1 + C.N_ENEMIES);
+    const powerByOwner = new Float64Array(1 + this.enemyCount);
     for (const c of this.caps) {
       if (c.owner < 0) continue;
       powerByOwner[c.owner] += c.troops;

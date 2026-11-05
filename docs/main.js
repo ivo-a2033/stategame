@@ -155,24 +155,50 @@ class MenuScene extends Phaser.Scene {
 
   create() {
     this.cameras.main.setBackgroundColor(CONFIG.COLORS.ocean);
-    this.add.text(WORLD_W / 2, WORLD_H * 0.28, 'STATE CLONE', {
+    this.add.text(WORLD_W / 2, WORLD_H * 0.23, 'STATE CLONE', {
       fontFamily: 'Arial', fontSize: '44px', fontStyle: 'bold', color: '#ffffff',
     }).setOrigin(0.5);
-    this.add.text(WORLD_W / 2, WORLD_H * 0.28 + 50,
+    this.add.text(WORLD_W / 2, WORLD_H * 0.23 + 50,
       'Click your capital, then click a target.\nCapture every capital to win.', {
         fontFamily: 'Arial', fontSize: '15px', color: '#9fb3c8', align: 'center',
       }).setOrigin(0.5);
 
-    this.add.text(WORLD_W / 2, WORLD_H * 0.44, 'Your kingdom starting troops', {
+    this.add.text(WORLD_W / 2, WORLD_H * 0.40, 'Your kingdom starting troops', {
       fontFamily: 'Arial', fontSize: '16px', color: '#ffffff',
     }).setOrigin(0.5);
-    this.troopInput = this.add.dom(WORLD_W / 2, WORLD_H * 0.49).createFromHTML(
+    this.troopInput = this.add.dom(WORLD_W / 2, WORLD_H * 0.45).createFromHTML(
       `<input id="start-troops" type="number" min="${CONFIG.START_TROOPS_MIN}" `
       + `max="${CONFIG.START_TROOPS_MAX}" step="1" value="${CONFIG.START_TROOPS}" `
       + 'aria-label="Your kingdom starting troops" '
       + 'style="width:180px;box-sizing:border-box;padding:9px;text-align:center;'
       + 'font: bold 18px Arial;color:#102030;background:#ffffff;border:2px solid #60a5fa;'
       + 'border-radius:6px;">');
+    let enemyCount = CONFIG.N_ENEMIES;
+    this.add.text(WORLD_W / 2, WORLD_H * 0.52, 'Number of opponents', {
+      fontFamily: 'Arial', fontSize: '16px', color: '#ffffff',
+    }).setOrigin(0.5);
+    const enemyCountText = this.add.text(WORLD_W / 2, WORLD_H * 0.58, String(enemyCount), {
+      fontFamily: 'Arial', fontSize: '24px', fontStyle: 'bold', color: '#ffffff',
+    }).setOrigin(0.5);
+    const decreaseEnemies = this.add.rectangle(
+      WORLD_W / 2 - 48, WORLD_H * 0.58, 42, 42, 0x334155)
+      .setStrokeStyle(2, 0xffffff).setInteractive({ useHandCursor: true });
+    const increaseEnemies = this.add.rectangle(
+      WORLD_W / 2 + 48, WORLD_H * 0.58, 42, 42, 0x334155)
+      .setStrokeStyle(2, 0xffffff).setInteractive({ useHandCursor: true });
+    this.add.text(decreaseEnemies.x, decreaseEnemies.y, '-', {
+      fontFamily: 'Arial', fontSize: '28px', fontStyle: 'bold', color: '#ffffff',
+    }).setOrigin(0.5);
+    this.add.text(increaseEnemies.x, increaseEnemies.y, '+', {
+      fontFamily: 'Arial', fontSize: '28px', fontStyle: 'bold', color: '#ffffff',
+    }).setOrigin(0.5);
+    const updateEnemyCount = (change) => {
+      enemyCount = Math.max(1, Math.min(CONFIG.N_ENEMIES, enemyCount + change));
+      enemyCountText.setText(String(enemyCount));
+    };
+    decreaseEnemies.on('pointerdown', () => updateEnemyCount(-1));
+    increaseEnemies.on('pointerdown', () => updateEnemyCount(1));
+
     const startGame = () => {
       const input = this.troopInput.getChildByID('start-troops');
       const parsed = Number(input.value);
@@ -180,12 +206,12 @@ class MenuScene extends Phaser.Scene {
         ? Math.max(CONFIG.START_TROOPS_MIN,
           Math.min(CONFIG.START_TROOPS_MAX, Math.floor(parsed)))
         : CONFIG.START_TROOPS;
-      this.scene.start('Game', { startTroops });
+      this.scene.start('Game', { startTroops, enemyCount });
     };
 
-    const btn = this.add.rectangle(WORLD_W / 2, WORLD_H * 0.60, 200, 64, 0x3b82f6)
+    const btn = this.add.rectangle(WORLD_W / 2, WORLD_H * 0.68, 200, 64, 0x3b82f6)
       .setStrokeStyle(3, 0xffffff).setInteractive({ useHandCursor: true });
-    this.add.text(WORLD_W / 2, WORLD_H * 0.60, 'PLAY', {
+    this.add.text(WORLD_W / 2, WORLD_H * 0.68, 'PLAY', {
       fontFamily: 'Arial', fontSize: '30px', fontStyle: 'bold', color: '#ffffff',
     }).setOrigin(0.5);
     btn.on('pointerover', () => btn.setFillStyle(0x60a5fa));
@@ -206,6 +232,9 @@ class GameScene extends Phaser.Scene {
 
   create(data = {}) {
     const C = CONFIG;
+    const requestedEnemyCount = Number.isFinite(data.enemyCount)
+      ? Math.floor(data.enemyCount) : C.N_ENEMIES;
+    this.enemyCount = Math.max(1, Math.min(C.N_ENEMIES, requestedEnemyCount));
     this.cameras.main.setBackgroundColor(C.COLORS.ocean);
     for (const key of STATUE_KEYS) {
       for (const source of this.textures.get(key).source) {
@@ -215,7 +244,7 @@ class GameScene extends Phaser.Scene {
 
     const seed = (Date.now() ^ Math.floor(Math.random() * 4294967296)) >>> 0;
     this.map = generateMapWithRetry(seed);
-    this.sim = new Sim(this.map, this.map.seed, data.startTroops);
+    this.sim = new Sim(this.map, this.map.seed, data.startTroops, this.enemyCount);
     this.selected = null;
     this.hoveredCap = null;
     this.pointerWorld = { x: WORLD_W / 2, y: WORLD_H / 2 };
@@ -252,7 +281,7 @@ class GameScene extends Phaser.Scene {
     this.unitG = this.add.graphics().setDepth(1);
     this.capG = this.add.graphics().setDepth(2.5);
     const statueKeys = Phaser.Utils.Array.Shuffle(STATUE_KEYS.slice());
-    this.playerStatues = Array.from({ length: 1 + C.N_ENEMIES }, (_, i) =>
+    this.playerStatues = Array.from({ length: 1 + this.enemyCount }, (_, i) =>
       statueKeys[i % statueKeys.length]);
     const areas = this.sim.caps.map((cap) => cap.area);
     const minArea = Math.min(...areas), maxArea = Math.max(...areas);
@@ -339,7 +368,7 @@ class GameScene extends Phaser.Scene {
     }
 
     this.debugPanelOpen = true;
-    const owners = CONFIG.N_ENEMIES;
+    const owners = this.enemyCount;
     this.debugObjects.push(this.add.rectangle(0, 0, WORLD_W, WORLD_H, 0x050a10, 0.96)
       .setOrigin(0, 0).setDepth(10).setScrollFactor(0));
     this.debugObjects.push(this.add.text(WORLD_W / 2, 24,
@@ -361,8 +390,8 @@ class GameScene extends Phaser.Scene {
         fontFamily: 'monospace', fontSize: '9px', fontStyle: 'bold',
         color: '#d1d5db',
       }).setDepth(11).setScrollFactor(0));
-      const legendStart = Math.max(220, WORLD_W - (1 + CONFIG.N_ENEMIES) * 35 - 8);
-      for (let owner = 0; owner <= CONFIG.N_ENEMIES; owner++) {
+      const legendStart = Math.max(220, WORLD_W - (1 + this.enemyCount) * 35 - 8);
+      for (let owner = 0; owner <= this.enemyCount; owner++) {
         const legendX = legendStart + owner * 35;
         this.debugObjects.push(this.add.rectangle(legendX, chart.titleY + 4, 5, 5,
           ownerColor(owner)).setDepth(11).setScrollFactor(0));
@@ -433,7 +462,7 @@ class GameScene extends Phaser.Scene {
   }
 
   _getBarMetrics() {
-    const owners = 1 + CONFIG.N_ENEMIES;
+    const owners = 1 + this.enemyCount;
     const units = new Float64Array(owners);
     const growth = new Float64Array(owners);
     for (const cap of this.sim.caps) {
@@ -481,7 +510,7 @@ class GameScene extends Phaser.Scene {
         g.lineBetween(gridX, y, gridX, y + height);
       }
 
-      const ownerCount = 1 + CONFIG.N_ENEMIES;
+      const ownerCount = 1 + this.enemyCount;
       for (let owner = 0; owner < ownerCount; owner++) {
         const upper = [];
         const lower = [];
@@ -610,7 +639,7 @@ class GameScene extends Phaser.Scene {
     // units, one fillStyle per owner
     const g = this.unitG;
     g.clear();
-    const owners = 1 + C.N_ENEMIES;
+    const owners = 1 + this.enemyCount;
     for (let o = 0; o < owners; o++) {
       g.fillStyle(ownerColor(o), 1);
       for (const u of sim.units) {
