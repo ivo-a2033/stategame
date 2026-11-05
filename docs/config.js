@@ -28,6 +28,8 @@ const CONFIG = {
   // Match
   N_ENEMIES: 3,
   START_TROOPS: 60,
+  START_TROOPS_MIN: 1,
+  START_TROOPS_MAX: 100000,
   NEUTRAL_TROOPS: [5, 18],
   GROWTH_PER_AREA: 0.002,    // troops/s per cell
 
@@ -51,11 +53,21 @@ const CONFIG = {
   HOVER_PULSE_SPEED: 5,       // radians/s
 
   // Difficulty
-  AI_START_TROOPS: 80,
+  AI_START_TROOPS: 150,
   AI_MOVE_INTERVAL: [0.8, 3], // per-AI base interval range in seconds
   AI_MOVE_INTERVAL_JITTER: 0.5, // seconds of per-decision interval variation
-  AI_MIN_TROOPS: [5, 25],    // per-AI reserve threshold range
-  AI_INTELLIGENCE: [0, 0.5, 1], // per-AI intelligence: random, mixed, or strategic
+  AI_MIN_TROOPS: [5, 100],    // each AI-owned capital gets its own sampled move threshold
+  AI_INTELLIGENCE: [0.5, 1],   // per-AI intelligence: mixed or strategic (add 0 for random)
+  AI_AGGRESSION: [0, 1],      // cautious AIs favor safe attacks; aggressive AIs favor enemy kingdoms
+  AI_NEUTRAL_PREFERENCE: [0, 1], // 0 = enemy capitals first, 1 = neutral capitals first
+  AI_EXPANSION_FOCUS: [0, 1], // how strongly available neutral capitals increase expansion priority
+  AI_TARGET_STRENGTH: [-1, 1], // -1 = attack the weakest kingdom, 1 = attack the strongest
+  AI_DISTANCE_BIAS: [0, 1],   // 0 = ignore distance, 1 = strongly prefer nearby capitals
+  AI_DECISION_RANDOMNESS: [0.2, 3.8], // per-decision target-score variation; 0 = fully consistent
+  LIGHTNING_INTERVAL: [12, 24], // seconds between lightning strikes
+  LIGHTNING_FLASH_DURATION: 0.65, // seconds capitals flash white after a strike
+  DEBUG_METRIC_INTERVAL: 3,    // seconds between debug-chart samples
+  DEBUG_METRIC_HISTORY: 420,   // one sample per graph pixel across the chart
 
   // Loop
   SIM_DT: 1 / 60,

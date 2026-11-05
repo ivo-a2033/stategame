@@ -2,14 +2,17 @@
 
 const HUMAN = 0;
 const NEUTRAL = -1;
-const AI_ENEMY_TARGET_SHARE = 0.35;
 
 class Sim {
-  constructor(map, seed) {
+  constructor(map, seed, startTroops = CONFIG.START_TROOPS) {
     const C = CONFIG;
     this.map = map;
     this.rng = mulberry32((seed ^ 0x9e3779b9) >>> 0);
     this.time = 0;
+    const requestedStartTroops = Number.isFinite(startTroops)
+      ? Math.floor(startTroops) : C.START_TROOPS;
+    this.startTroops = Math.max(
+      C.START_TROOPS_MIN, Math.min(C.START_TROOPS_MAX, requestedStartTroops));
     this.result = null;        // null | 'win' | 'lose'
     this.events = [];          // capture and troop-change events drained by the renderer
     this.units = [];
@@ -20,6 +23,7 @@ class Sim {
       area: c.area,
       owner: NEUTRAL,
       troops: 0,
+      minTroops: 0,
       orders: [],              // FIFO of {target, remaining}
       emitAcc: 0,
     }));
@@ -32,23 +36,33 @@ class Sim {
     this.next = new Int32Array(1024);
 
     this._setupMatch();
+    this.nextLightning = this._randomLightningInterval();
   }
 
   _setupMatch() {
     const C = CONFIG, caps = this.caps, rng = this.rng;
     const players = 1 + C.N_ENEMIES;
-    this.aiMinTroops = new Array(players).fill(0);
     this.aiIntelligence = new Array(players).fill(0);
+    this.aiAggression = new Array(players).fill(0);
+    this.aiNeutralPreference = new Array(players).fill(0);
+    this.aiExpansionFocus = new Array(players).fill(0);
+    this.aiTargetStrength = new Array(players).fill(0);
+    this.aiDistanceBias = new Array(players).fill(0);
+    this.aiDecisionRandomness = new Array(players).fill(0);
     this.aiMoveIntervals = new Array(players).fill(0);
     this.aiMoveTimers = new Array(players).fill(0);
     this.aiMoveDelays = new Array(players).fill(0);
     for (let owner = 1; owner < players; owner++) {
-      const minRange = C.AI_MIN_TROOPS;
       const intelligenceLevels = C.AI_INTELLIGENCE;
-      this.aiMinTroops[owner] = Math.floor(
-        minRange[0] + rng() * (minRange[1] - minRange[0] + 1));
       this.aiIntelligence[owner] = intelligenceLevels[
         Math.floor(rng() * intelligenceLevels.length)];
+      const sample = ([min, max]) => min + rng() * (max - min);
+      this.aiAggression[owner] = sample(C.AI_AGGRESSION);
+      this.aiNeutralPreference[owner] = sample(C.AI_NEUTRAL_PREFERENCE);
+      this.aiExpansionFocus[owner] = sample(C.AI_EXPANSION_FOCUS);
+      this.aiTargetStrength[owner] = sample(C.AI_TARGET_STRENGTH);
+      this.aiDistanceBias[owner] = sample(C.AI_DISTANCE_BIAS);
+      this.aiDecisionRandomness[owner] = sample(C.AI_DECISION_RANDOMNESS);
       const intervalRange = C.AI_MOVE_INTERVAL;
       this.aiMoveIntervals[owner] = intervalRange[0]
         + rng() * (intervalRange[1] - intervalRange[0]);
@@ -76,8 +90,14 @@ class Sim {
     }
     chosen.forEach((id, p) => {
       caps[id].owner = p;
-      caps[id].troops = p === HUMAN ? C.START_TROOPS : C.AI_START_TROOPS;
+      caps[id].troops = p === HUMAN ? this.startTroops : C.AI_START_TROOPS;
+      caps[id].minTroops = p === HUMAN ? 0 : this._randomAiMinTroops();
     });
+  }
+
+  _randomAiMinTroops() {
+    const [min, max] = CONFIG.AI_MIN_TROOPS;
+    return Math.floor(min + this.rng() * (max - min + 1));
   }
 
   // Queue a send order. Amount is a snapshot taken now.
@@ -107,12 +127,33 @@ class Sim {
         cap.troops += growth * dt;
       }
     }
+    this.nextLightning -= dt;
+    if (this.nextLightning <= 0) {
+      this._lightningStrike();
+      this.nextLightning = this._randomLightningInterval();
+    }
     this._ai(dt);
     this._emit(dt);
     this._move(dt);
     this._interact(dt);
     this._arrive();
     this._checkEnd();
+  }
+
+  _randomLightningInterval() {
+    const [min, max] = CONFIG.LIGHTNING_INTERVAL;
+    return min + this.rng() * (max - min);
+  }
+
+  _lightningStrike() {
+    const remaining = this.caps.slice();
+    for (let strike = 0; strike < 3 && remaining.length; strike++) {
+      const index = Math.floor(this.rng() * remaining.length);
+      const [cap] = remaining.splice(index, 1);
+      cap.troops = Math.floor(cap.troops / 2);
+      this.events.push({ type: 'lightning', id: cap.id });
+      this.events.push({ type: 'troop-change', id: cap.id });
+    }
   }
 
   // Idle AI capitals decide on a target using their owner's move interval.
@@ -123,7 +164,7 @@ class Sim {
       this.aiMoveTimers[owner] -= this.aiMoveDelays[owner];
       this.aiMoveDelays[owner] = this._randomAiMoveDelay(owner);
       for (const cap of this.caps) {
-        if (cap.owner !== owner || cap.troops < this.aiMinTroops[owner] || cap.orders.length) continue;
+        if (cap.owner !== owner || cap.troops < cap.minTroops || cap.orders.length) continue;
         const target = this._aiPickTarget(cap);
         if (target >= 0) this.send(cap.id, target, owner);
       }
@@ -148,30 +189,54 @@ class Sim {
     const sent = Math.floor(cap.troops * C.SEND_FRACTION);
     if (sent < 1) return -1;
 
-    let ownerTroops = 0, totalTroops = 0;
+    const powerByOwner = new Float64Array(1 + C.N_ENEMIES);
     for (const c of this.caps) {
       if (c.owner < 0) continue;
-      totalTroops += c.troops;
-      if (c.owner === cap.owner) ownerTroops += c.troops;
+      powerByOwner[c.owner] += c.troops;
     }
     for (const unit of this.units) {
       if (unit.dead || unit.owner < 0) continue;
-      totalTroops++;
-      if (unit.owner === cap.owner) ownerTroops++;
+      powerByOwner[unit.owner]++;
     }
-    const enemyPhase = totalTroops > 0 && ownerTroops / totalTroops >= AI_ENEMY_TARGET_SHARE;
-    const bias = 4 ** intelligence;
-    const neutralWeight = enemyPhase ? 1 : bias;
-    const enemyWeight = enemyPhase ? bias : 1;
+    const activeOwners = new Set(
+      this.caps.filter((target) => target.owner >= 0).map((target) => target.owner));
+    const opponents = [...activeOwners].filter((owner) => owner !== cap.owner);
+    opponents.sort((a, b) => powerByOwner[a] - powerByOwner[b] || a - b);
+    const opponentRank = new Float64Array(powerByOwner.length);
+    for (let rank = 0; rank < opponents.length; rank++) {
+      opponentRank[opponents[rank]] = opponents.length > 1
+        ? rank / (opponents.length - 1) : 0.5;
+    }
+
+    const neutrality = this.aiNeutralPreference[cap.owner];
+    const aggression = this.aiAggression[cap.owner];
+    const neutralCount = this.caps.reduce(
+      (count, target) => count + (target.owner === NEUTRAL ? 1 : 0), 0);
+    const neutralShare = neutralCount / Math.max(1, this.caps.length);
+    const neutralPreference = Math.max(0, Math.min(1,
+      0.5 + (neutrality - 0.5) * intelligence
+        + this.aiExpansionFocus[cap.owner] * intelligence * (neutralShare - 0.25)));
+    const effectiveAggression = 0.5 + (aggression - 0.5) * intelligence;
+    const strengthPreference = this.aiTargetStrength[cap.owner] * intelligence;
+    const distanceBias = this.aiDistanceBias[cap.owner] * intelligence;
     const targets = [];
 
     for (const target of this.caps) {
       if (target.owner === cap.owner || sent <= target.troops) continue;
-      const preference = target.owner === NEUTRAL ? neutralWeight : enemyWeight;
       const margin = sent - target.troops;
-      const strength = 1 + Math.min(margin / Math.max(target.troops, 1), 2);
+      const safety = 0.75 + 0.75 * effectiveAggression
+        + (1 - effectiveAggression) * Math.min(margin / sent, 1);
+      const preference = target.owner === NEUTRAL
+        ? 0.4 + neutralPreference * 1.6
+        : (0.4 + (1 - neutralPreference) * 1.6) * (0.5 + effectiveAggression);
+      const rank = opponentRank[target.owner] ?? 0.5;
+      const strengthPreferenceWeight = target.owner === NEUTRAL
+        ? 1 : Math.exp(strengthPreference * (rank * 2 - 1) * 1.5);
       const distance = Math.hypot(cap.x - target.x, cap.y - target.y);
-      const weight = preference * strength / (1 + distance / 500);
+      const baseWeight = preference * safety * strengthPreferenceWeight
+        / Math.pow(1 + distance / 500, distanceBias);
+      const jitter = this.aiDecisionRandomness[cap.owner];
+      const weight = baseWeight * Math.exp((this.rng() * 2 - 1) * jitter * 2);
       targets.push({ id: target.id, weight });
     }
 
@@ -325,6 +390,7 @@ class Sim {
   _capture(cap, owner) {
     cap.owner = owner;
     cap.troops = 1;
+    cap.minTroops = owner > HUMAN ? this._randomAiMinTroops() : 0;
     cap.orders.length = 0;   // source changed hands: cancel its orders
     cap.emitAcc = 0;
     this.events.push({ type: 'capture', id: cap.id });

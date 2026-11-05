@@ -163,14 +163,37 @@ class MenuScene extends Phaser.Scene {
         fontFamily: 'Arial', fontSize: '15px', color: '#9fb3c8', align: 'center',
       }).setOrigin(0.5);
 
-    const btn = this.add.rectangle(WORLD_W / 2, WORLD_H * 0.55, 200, 64, 0x3b82f6)
+    this.add.text(WORLD_W / 2, WORLD_H * 0.44, 'Your kingdom starting troops', {
+      fontFamily: 'Arial', fontSize: '16px', color: '#ffffff',
+    }).setOrigin(0.5);
+    this.troopInput = this.add.dom(WORLD_W / 2, WORLD_H * 0.49).createFromHTML(
+      `<input id="start-troops" type="number" min="${CONFIG.START_TROOPS_MIN}" `
+      + `max="${CONFIG.START_TROOPS_MAX}" step="1" value="${CONFIG.START_TROOPS}" `
+      + 'aria-label="Your kingdom starting troops" '
+      + 'style="width:180px;box-sizing:border-box;padding:9px;text-align:center;'
+      + 'font: bold 18px Arial;color:#102030;background:#ffffff;border:2px solid #60a5fa;'
+      + 'border-radius:6px;">');
+    const startGame = () => {
+      const input = this.troopInput.getChildByID('start-troops');
+      const parsed = Number(input.value);
+      const startTroops = Number.isFinite(parsed)
+        ? Math.max(CONFIG.START_TROOPS_MIN,
+          Math.min(CONFIG.START_TROOPS_MAX, Math.floor(parsed)))
+        : CONFIG.START_TROOPS;
+      this.scene.start('Game', { startTroops });
+    };
+
+    const btn = this.add.rectangle(WORLD_W / 2, WORLD_H * 0.60, 200, 64, 0x3b82f6)
       .setStrokeStyle(3, 0xffffff).setInteractive({ useHandCursor: true });
-    this.add.text(WORLD_W / 2, WORLD_H * 0.55, 'PLAY', {
+    this.add.text(WORLD_W / 2, WORLD_H * 0.60, 'PLAY', {
       fontFamily: 'Arial', fontSize: '30px', fontStyle: 'bold', color: '#ffffff',
     }).setOrigin(0.5);
     btn.on('pointerover', () => btn.setFillStyle(0x60a5fa));
     btn.on('pointerout', () => btn.setFillStyle(0x3b82f6));
-    btn.on('pointerdown', () => this.scene.start('Game'));
+    btn.on('pointerdown', startGame);
+    this.troopInput.getChildByID('start-troops').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') startGame();
+    });
   }
 }
 
@@ -181,7 +204,7 @@ class GameScene extends Phaser.Scene {
     for (const key of STATUE_KEYS) this.load.image(key, 'assets/' + key + '.png');
   }
 
-  create() {
+  create(data = {}) {
     const C = CONFIG;
     this.cameras.main.setBackgroundColor(C.COLORS.ocean);
     for (const key of STATUE_KEYS) {
@@ -192,13 +215,22 @@ class GameScene extends Phaser.Scene {
 
     const seed = (Date.now() ^ Math.floor(Math.random() * 4294967296)) >>> 0;
     this.map = generateMapWithRetry(seed);
-    this.sim = new Sim(this.map, this.map.seed);
+    this.sim = new Sim(this.map, this.map.seed, data.startTroops);
     this.selected = null;
     this.hoveredCap = null;
     this.pointerWorld = { x: WORLD_W / 2, y: WORLD_H / 2 };
     this.acc = 0;
     this.endTime = 0;
     this.overlayShown = false;
+    this.debugTapCount = 0;
+    this.debugTapStartedAt = 0;
+    this.debugTapX = 0;
+    this.debugTapY = 0;
+    this.debugPanelOpen = false;
+    this.debugObjects = [];
+    this.debugGraphs = [];
+    this.debugMetricHistory = [];
+    this.debugLastMetricTime = -CONFIG.DEBUG_METRIC_INTERVAL;
 
     // cells per region for fast repaint on capture
     this.regionCells = this.map.capitals.map(() => []);
@@ -243,7 +275,19 @@ class GameScene extends Phaser.Scene {
     this.shownTroops = this.sim.caps.map(() => -1);
     this.shownColors = this.sim.caps.map((cap) => Math.min(Math.floor(cap.troops), 100));
     this.capPulseUntil = this.sim.caps.map(() => 0);
+    this.lightningFlashUntil = this.sim.caps.map(() => 0);
     this.shareBar = this.add.graphics().setDepth(4);
+    this.shareLabels = [
+      this.add.text(2, 0, 'POP', {
+        fontFamily: 'monospace', fontSize: '7px', color: '#ffffff',
+        stroke: '#000000', strokeThickness: 2,
+      }).setDepth(5).setScrollFactor(0),
+      this.add.text(2, 8, 'GROW', {
+        fontFamily: 'monospace', fontSize: '7px', color: '#ffffff',
+        stroke: '#000000', strokeThickness: 2,
+      }).setDepth(5).setScrollFactor(0),
+    ];
+    this._recordDebugMetrics();
 
     this.add.text(4, WORLD_H - 4, 'seed ' + this.map.seed, {
       fontFamily: 'monospace', fontSize: '10px', color: '#6b8299',
@@ -257,8 +301,211 @@ class GameScene extends Phaser.Scene {
     this.input.on('pointerdown', (p) => {
       this.pointerWorld.x = p.worldX;
       this.pointerWorld.y = p.worldY;
+      if (this.debugPanelOpen) {
+        this._trackDebugTap(p.x, p.y);
+        return;
+      }
+      if (this._trackDebugTap(p.x, p.y)) return;
       this.onClick(p.worldX, p.worldY);
     });
+  }
+
+  _trackDebugTap(x, y) {
+    const now = this.time.now;
+    const maxInterval = 700;
+    const maxDistance = 24;
+    if (this.debugTapCount === 0 || now - this.debugTapStartedAt > maxInterval
+      || Math.hypot(x - this.debugTapX, y - this.debugTapY) > maxDistance) {
+      this.debugTapCount = 0;
+      this.debugTapStartedAt = now;
+      this.debugTapX = x;
+      this.debugTapY = y;
+    }
+    this.debugTapCount++;
+    if (this.debugTapCount < 3) return false;
+
+    this.debugTapCount = 0;
+    this._toggleDebugPanel();
+    return true;
+  }
+
+  _toggleDebugPanel() {
+    for (const object of this.debugObjects) object.destroy();
+    this.debugObjects.length = 0;
+    this.debugGraphs.length = 0;
+    if (this.debugPanelOpen) {
+      this.debugPanelOpen = false;
+      return;
+    }
+
+    this.debugPanelOpen = true;
+    const owners = CONFIG.N_ENEMIES;
+    this.debugObjects.push(this.add.rectangle(0, 0, WORLD_W, WORLD_H, 0x050a10, 0.96)
+      .setOrigin(0, 0).setDepth(10).setScrollFactor(0));
+    this.debugObjects.push(this.add.text(WORLD_W / 2, 24,
+      'AI DEBUG  |  triple-tap same spot to close', {
+      fontFamily: 'monospace', fontSize: '13px', fontStyle: 'bold',
+      color: '#ffffff', stroke: '#000000', strokeThickness: 2,
+    }).setOrigin(0.5, 0).setDepth(11).setScrollFactor(0));
+
+    const graphX = 44, graphWidth = WORLD_W - 56;
+    const graphHeight = Math.min(104, Math.max(56, WORLD_H * 0.13));
+    const chartRows = [
+      { title: 'UNIT SHARE', key: 'units', titleY: 48, graphY: 64 },
+      { title: 'SPAWN-POWER SHARE', key: 'growth', titleY: 184, graphY: 200 },
+    ];
+    for (const chart of chartRows) {
+      const historySeconds = CONFIG.DEBUG_METRIC_INTERVAL * CONFIG.DEBUG_METRIC_HISTORY;
+      this.debugObjects.push(this.add.text(14, chart.titleY,
+        `${chart.title}  (up to ${historySeconds}s history)`, {
+        fontFamily: 'monospace', fontSize: '9px', fontStyle: 'bold',
+        color: '#d1d5db',
+      }).setDepth(11).setScrollFactor(0));
+      const legendStart = Math.max(220, WORLD_W - (1 + CONFIG.N_ENEMIES) * 35 - 8);
+      for (let owner = 0; owner <= CONFIG.N_ENEMIES; owner++) {
+        const legendX = legendStart + owner * 35;
+        this.debugObjects.push(this.add.rectangle(legendX, chart.titleY + 4, 5, 5,
+          ownerColor(owner)).setDepth(11).setScrollFactor(0));
+        this.debugObjects.push(this.add.text(legendX + 5, chart.titleY,
+          owner === HUMAN ? 'YOU' : `AI${owner}`, {
+            fontFamily: 'monospace', fontSize: '7px', color: '#d1d5db',
+          }).setDepth(11).setScrollFactor(0));
+      }
+      for (const tick of [
+        { label: '100%', y: chart.graphY - 2 },
+        { label: '50%', y: chart.graphY + graphHeight / 2 - 3 },
+        { label: '0%', y: chart.graphY + graphHeight - 5 },
+      ]) {
+        this.debugObjects.push(this.add.text(12, tick.y, tick.label, {
+          fontFamily: 'monospace', fontSize: '7px', color: '#94a3b8',
+        }).setDepth(11).setScrollFactor(0));
+      }
+      const graphics = this.add.graphics().setDepth(11).setScrollFactor(0);
+      this.debugObjects.push(graphics);
+      this.debugObjects.push(this.add.text(graphX, chart.graphY + graphHeight + 1, 'older', {
+        fontFamily: 'monospace', fontSize: '7px', color: '#94a3b8',
+      }).setDepth(11).setScrollFactor(0));
+      this.debugObjects.push(this.add.text(graphX + graphWidth, chart.graphY + graphHeight + 1, 'now', {
+        fontFamily: 'monospace', fontSize: '7px', color: '#94a3b8',
+      }).setOrigin(1, 0).setDepth(11).setScrollFactor(0));
+      this.debugGraphs.push({
+        graphics, key: chart.key, x: graphX, y: chart.graphY,
+        width: graphWidth, height: graphHeight,
+      });
+    }
+
+    const rowsTop = 216 + graphHeight;
+    const rowHeight = (WORLD_H - rowsTop - 8) / Math.max(owners, 1);
+    for (let owner = 1; owner <= owners; owner++) {
+      const targetStrength = this.sim.aiTargetStrength[owner];
+      const targetStyle = targetStrength < -0.25 ? 'weakest'
+        : targetStrength > 0.25 ? 'strongest' : 'any';
+      const color = ownerColor(owner);
+      const colorHex = '#' + color.toString(16).padStart(6, '0');
+      const percent = (value) => Math.round(value * 100);
+      const intelligence = percent(this.sim.aiIntelligence[owner]);
+      const intelligenceStyle = intelligence < 35 ? 'random'
+        : intelligence < 75 ? 'mixed' : 'strategic';
+      const neutrality = percent(this.sim.aiNeutralPreference[owner]);
+      const aggression = percent(this.sim.aiAggression[owner]);
+      const expansion = percent(this.sim.aiExpansionFocus[owner]);
+      const distanceBias = percent(this.sim.aiDistanceBias[owner]);
+      const randomness = percent(this.sim.aiDecisionRandomness[owner]);
+      const ownedCaps = this.sim.caps
+        .filter((cap) => cap.owner === owner)
+        .map((cap) => `${cap.id}:${cap.minTroops}`).join(', ') || 'none';
+      const description = `${intelligenceStyle} intelligence (${intelligence}%); `
+        + `each owned capital requires its own reserve floor (${ownedCaps}); moves every `
+        + `${this.sim.aiMoveIntervals[owner].toFixed(1)}s ±${CONFIG.AI_MOVE_INTERVAL_JITTER.toFixed(1)}s. `
+        + `Aggression ${aggression}% favors enemy attacks; neutral preference ${neutrality}% `
+        + `and expansion focus ${expansion}% increase neutral expansion when capitals remain. `
+        + `Targets the ${targetStyle} kingdom; nearby-target bias ${distanceBias}%; `
+        + `decision randomness ${randomness}%. Starts with ${CONFIG.AI_START_TROOPS} troops.`;
+      const row = this.add.text(20, rowsTop + (owner - 1) * rowHeight,
+        `AI ${owner}  ${colorHex}\n${description}`, {
+          fontFamily: 'monospace', fontSize: '9px', lineSpacing: 3,
+          wordWrap: { width: WORLD_W - 40 },
+          color: css(color), stroke: '#000000', strokeThickness: 2,
+        }).setDepth(11).setScrollFactor(0);
+      this.debugObjects.push(row);
+    }
+    this._drawDebugGraphs();
+  }
+
+  _getBarMetrics() {
+    const owners = 1 + CONFIG.N_ENEMIES;
+    const units = new Float64Array(owners);
+    const growth = new Float64Array(owners);
+    for (const cap of this.sim.caps) {
+      if (cap.owner < 0) continue;
+      units[cap.owner] += cap.troops;
+      growth[cap.owner] += Math.min(
+        cap.area * CONFIG.GROWTH_PER_AREA, CONFIG.MAX_TROOP_GROWTH_PER_SECOND);
+    }
+    for (const unit of this.sim.units) {
+      if (!unit.dead && unit.owner >= 0) units[unit.owner]++;
+    }
+    return { units, growth };
+  }
+
+  _recordDebugMetrics() {
+    const { units, growth } = this._getBarMetrics();
+    const fractions = (values) => {
+      const total = values.reduce((sum, value) => sum + value, 0);
+      return Array.from(values, (value) => total > 0 ? value / total : 0);
+    };
+    this.debugMetricHistory.push({
+      time: this.sim.time,
+      units: fractions(units),
+      growth: fractions(growth),
+    });
+    if (this.debugMetricHistory.length > CONFIG.DEBUG_METRIC_HISTORY) {
+      this.debugMetricHistory.shift();
+    }
+    this.debugLastMetricTime = this.sim.time;
+  }
+
+  _drawDebugGraphs() {
+    const history = this.debugMetricHistory;
+    for (const chart of this.debugGraphs) {
+      const g = chart.graphics;
+      const { x, y, width, height } = chart;
+      g.clear();
+      g.lineStyle(1, 0x64748b, 0.45);
+      for (let step = 0; step <= 4; step++) {
+        const gridY = y + height * step / 4;
+        g.lineBetween(x, gridY, x + width, gridY);
+      }
+      for (let step = 0; step <= 4; step++) {
+        const gridX = x + width * step / 4;
+        g.lineBetween(gridX, y, gridX, y + height);
+      }
+
+      const ownerCount = 1 + CONFIG.N_ENEMIES;
+      for (let owner = 0; owner < ownerCount; owner++) {
+        const upper = [];
+        const lower = [];
+        for (let i = 0; i < history.length; i++) {
+          const sample = history[i][chart.key];
+          const pointX = x + 2*i;
+          const before = sample.slice(0, owner).reduce((sum, value) => sum + value, 0);
+          const through = before + (sample[owner] || 0);
+          lower.push({ x: pointX, y: y + height * (1 - before) });
+          upper.push({ x: pointX, y: y + height * (1 - through) });
+        }
+        if (!upper.length) continue;
+
+        g.fillStyle(ownerColor(owner), 0.9);
+        g.beginPath();
+        g.moveTo(upper[0].x, upper[0].y);
+        for (let i = 1; i < upper.length; i++) g.lineTo(upper[i].x, upper[i].y);
+        for (let i = lower.length - 1; i >= 0; i--) {
+          g.lineTo(lower[i].x, lower[i].y);
+        }
+        g.closePath();
+        g.fillPath();
+      }
+    }
   }
 
   paintRegion(id) {
@@ -318,11 +565,17 @@ class GameScene extends Phaser.Scene {
         if (sim.result) break;
       }
     }
+    if (sim.time - this.debugLastMetricTime >= C.DEBUG_METRIC_INTERVAL) {
+      this._recordDebugMetrics();
+      if (this.debugPanelOpen) this._drawDebugGraphs();
+    }
 
     let terrainChanged = false;
     if (sim.events.length) {
       for (const e of sim.events) {
-        if (e.type === 'capture') {
+        if (e.type === 'lightning') {
+          this.lightningFlashUntil[e.id] = this.time.now + C.LIGHTNING_FLASH_DURATION * 1000;
+        } else if (e.type === 'capture') {
           this.paintRegion(e.id);
           const cap = sim.caps[e.id];
           this.capImages[e.id].setTexture(this.playerStatues[cap.owner]);
@@ -379,6 +632,7 @@ class GameScene extends Phaser.Scene {
         1 - (this.capPulseUntil[cap.id] - now) / (C.CAPITAL_PULSE_DURATION * 1000)));
       const pulse = Math.sin(pulseProgress * Math.PI) * C.CAPITAL_PULSE_AMOUNT;
       const radius = C.CAPITAL_RADIUS - 1 + pulse;
+      let flashRadius = radius;
       if (cap.owner < 0) {
         cg.fillStyle(ownerColor(cap.owner), 1);
         cg.fillCircle(cap.x, cap.y, radius);
@@ -387,10 +641,17 @@ class GameScene extends Phaser.Scene {
       } else {
         const imageSize = this.capitalImageSizes[cap.id]
           * (radius / (C.CAPITAL_RADIUS - 1));
+        flashRadius = imageSize * 0.55;
         this.capImages[cap.id]
           .setTexture(this.playerStatues[cap.owner])
           .setVisible(true)
           .setDisplaySize(imageSize, imageSize);
+      }
+      const flashRemaining = this.lightningFlashUntil[cap.id] - now;
+      if (flashRemaining > 0) {
+        const alpha = Math.min(1, flashRemaining / (C.LIGHTNING_FLASH_DURATION * 1000));
+        cg.fillStyle(0xffffff, alpha);
+        cg.fillCircle(cap.x, cap.y, flashRadius);
       }
 
       const t = Math.floor(cap.troops);
@@ -445,21 +706,35 @@ class GameScene extends Phaser.Scene {
       }
     }
 
-    const totals = new Float64Array(owners);
-    for (const cap of sim.caps) if (cap.owner >= 0) totals[cap.owner] += cap.troops;
-    for (const unit of sim.units) if (!unit.dead && unit.owner >= 0) totals[unit.owner]++;
+    const { units: totals, growth } = this._getBarMetrics();
     let total = 0;
     for (const count of totals) total += count;
     const bar = this.shareBar;
+    const barStart = 32;
+    const barWidth = WORLD_W - barStart;
     bar.clear();
     bar.fillStyle(0x050a10, 0.9);
-    bar.fillRect(0, 0, WORLD_W, 8);
+    bar.fillRect(barStart, 0, barWidth, 8);
     if (total > 0) {
-      let x = 0;
+      let x = barStart;
       for (let owner = 0; owner < owners; owner++) {
-        const width = WORLD_W * totals[owner] / total;
+        const width = barWidth * totals[owner] / total;
         bar.fillStyle(ownerColor(owner), 1);
         bar.fillRect(x, 0, width, 8);
+        x += width;
+      }
+    }
+
+    let totalGrowth = 0;
+    for (const rate of growth) totalGrowth += rate;
+    bar.fillStyle(0x050a10, 0.9);
+    bar.fillRect(barStart, 8, barWidth, 8);
+    if (totalGrowth > 0) {
+      let x = barStart;
+      for (let owner = 0; owner < owners; owner++) {
+        const width = barWidth * growth[owner] / totalGrowth;
+        bar.fillStyle(ownerColor(owner), 1);
+        bar.fillRect(x, 8, width, 8);
         x += width;
       }
     }
@@ -487,6 +762,9 @@ new Phaser.Game({
   backgroundColor: '#0d2238',
   pipeline: {
     SeaPipeline,
+  },
+  dom: {
+    createContainer: true,
   },
   scale: {
     mode: Phaser.Scale.FIT,
